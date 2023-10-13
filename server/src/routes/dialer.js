@@ -1,12 +1,10 @@
-import "dotenv/config";
-import express from "express";
-import cors from "cors";
 import axios from "axios";
+import { Router } from "express";
+const router = Router();
 
-const app = express();
+const MAX_CONCURRENT = 3;
 const webhookURL = process.env.WEBHOOK_URL;
 const callURL = process.env.CALL_URL;
-const MAX_CONCURRENT = 3;
 
 const numbers = [
   "13018040009",
@@ -21,12 +19,26 @@ const numbers = [
 ];
 
 class Dialer {
-  constructor(numbers, maxConcurrentCalls) {
+  constructor(numbers, maxConcurrentCalls, io) {
     this.callIndex = 0;
     this.maxConcurrentCalls = maxConcurrentCalls;
-    this.calls = numbers.map((n) => {
-      return { number: n };
+
+    this.calls = numbers.map((n, idx) => {
+      return { number: n, displayId: idx };
     });
+
+    io.on("connection", (socket) => {
+      console.log("got a connection!");
+      this.socket = socket;
+    });
+
+    io.on("disconnect", () => {
+      console.log("DCED");
+    });
+  }
+
+  getCalls() {
+    return this.calls;
   }
 
   startDialing() {
@@ -44,11 +56,12 @@ class Dialer {
           webhookURL,
         };
         this.callIndex += 1;
-        const { data } = await axios.post(callURL, json);
-        const { id } = data;
-        this.calls[idx].id = id;
-        console.log("Active calls:", this.getActiveCalls());
-        console.log(this.calls);
+        axios.post(callURL, json).then(({ data }) => {
+          const { id } = data;
+          this.calls[idx].id = id;
+          console.log("Active calls:", this.getActiveCalls());
+          console.log(this.calls);
+        });
       } catch (e) {
         console.log(e);
       }
@@ -67,6 +80,11 @@ class Dialer {
 
     console.log("Active calls:", this.getActiveCalls());
     console.log(this.calls);
+    if (this.socket) {
+      this.socket.emit("status", JSON.stringify(this.calls));
+    } else {
+      console.log("socket not found");
+    }
   }
 
   getActiveCalls() {
@@ -79,20 +97,25 @@ class Dialer {
   }
 }
 
-const dialer = new Dialer(numbers, MAX_CONCURRENT);
+const configureRouter = (io) => {
+  let dialer;
 
-app.use(express.json());
-app.use(cors());
+  router.get("/get-numbers", (req, res) => {
+    dialer = new Dialer(numbers, MAX_CONCURRENT, io);
+    res.status(200).json(dialer.getCalls());
+  });
 
-app.get("/api/call", async (req, res) => {
-  dialer.startDialing();
-  res.status(200).send("All calls initiated");
-});
+  router.get("/call", (req, res) => {
+    dialer.startDialing();
+    res.status(200).send("Dialing all numbers");
+  });
 
-app.post("/webhook/calls", (req, res) => {
-  const { id, status } = req.body;
-  dialer.updateCallStatus(id, status);
-  res.status(200).send();
-});
+  router.post("/update-dialer", (req, res) => {
+    const { id, status } = req.body;
+    dialer.updateCallStatus(id, status);
+  });
 
-export default app;
+  return router;
+};
+
+export default configureRouter;
